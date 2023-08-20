@@ -1,0 +1,12 @@
+EXPORTS
+	QDPInit
+	QDPUnInit
+	QDPInitDrawPanel
+	QDPAnalyzeColorCommand
+	QDPExecuteCommand
+	QDPGetImageData
+	QDPGetStreamSize
+	QDPGetStreamData
+	QDPReleaseIUnknown
+	QDPDestroyImage
+	QDPGetObjCount
