@@ -1,7 +1,8 @@
 # QQDrawPanel
 ## 瞎几把写的QQ群画板bot
+![avatar](https://github.com/QingKong-s/QQDrawPanel/blob/master/ScreenShot/1.png)
 
-
+![avatar](https://github.com/QingKong-s/QQDrawPanel/blob/master/ScreenShot/2.png)
 
 # 指令表
 
