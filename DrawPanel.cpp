@@ -11,6 +11,8 @@
 #include "Utility.h"
 #include "DbgHelper.h"
 
+#pragma comment(lib,"msimg32.lib")
+
 HBITMAP m_hBitmap = NULL;
 HDC m_hCDC = NULL;
 HGDIOBJ m_hOldBmp = NULL;
@@ -27,6 +29,8 @@ SIZE_T m_idxCurrBrush = -1;
 SIZE_T m_idxCurrPen = -1;
 SIZE_T m_idxCurrFont = -1;
 
+int m_cx = 0, m_cy = 0;
+
 #define QDPE_OK				0
 #define QDPE_PARAM_COUNT	1
 #define QDPE_INVALID_PARAM	2
@@ -36,6 +40,8 @@ SIZE_T m_idxCurrFont = -1;
 #define QDPE_NULL_ARRAY		6
 #define QDPE_INVALID_CMD	7
 #define QDPE_NO_FONT		8
+#define QDPE_SO_LARGE_SIZE	9
+#define QDPE_GDIP_ERROR		10
 
 
 struct QDPBIN
@@ -81,6 +87,17 @@ void __stdcall QDPUnInit()
 		m_hBitmap = NULL;
 		m_hOldBmp = NULL;
 	}
+
+	for (auto x : m_Pens)
+		GdipDeletePen(x);
+	for (auto x : m_Brushes)
+		GdipDeleteBrush(x);
+	for (auto x : m_Fonts)
+		GdipDeleteFont(x);
+	m_Pens.clear();
+	m_Brushes.clear();
+	m_Fonts.clear();
+	m_cx = m_cy = 0;
 }
 
 BOOL __stdcall QDPInit()
@@ -98,14 +115,14 @@ BOOL __stdcall QDPInit()
 	m_idxCurrBrush = 0;
 
 	GpPen* pPen;
-	GdipCreatePen1(0xFF000000, 2.f, UnitWorld, &pPen);
+	GdipCreatePen1(0xFF000000, 2.f, UnitPixel, &pPen);
 	m_Pens.push_back(pPen);
 	m_idxCurrPen = 0;
 
 	GpFontFamily* pFontFamily;
 	GdipCreateFontFamilyFromName(L"微软雅黑", NULL, &pFontFamily);
 	GpFont* pFont;
-	GdipCreateFont(pFontFamily, 40.f, FontStyleRegular, UnitWorld, &pFont);
+	GdipCreateFont(pFontFamily, 40.f, FontStyleRegular, UnitPixel, &pFont);
 	GdipDeleteFontFamily(pFontFamily);
 	m_Fonts.push_back(pFont);
 	m_idxCurrFont = 0;
@@ -120,6 +137,10 @@ BOOL __stdcall QDPInitDrawPanel(int cx, int cy)
 	m_hCDC = CreateCompatibleDC(hDC);
 	m_hBitmap = CreateCompatibleBitmap(hDC, cx, cy);
 	m_hOldBmp = SelectObject(m_hCDC, m_hBitmap);
+	ReleaseDC(NULL, hDC);
+
+	m_cx = cx;
+	m_cy = cy;
 
 	GdipCreateFromHDC(m_hCDC, &m_pGraphics);
 	RECT rc{ 0,0,cx,cy };
@@ -127,7 +148,7 @@ BOOL __stdcall QDPInitDrawPanel(int cx, int cy)
 	return TRUE;
 }
 
-int QDPAnalyzeColorCommand(PCWSTR pszCmd, ARGB* pargb)
+int __stdcall QDPAnalyzeColorCommand(PCWSTR pszCmd, ARGB* pargb)
 {
 	if (wcsncmp(pszCmd, L"ARGB(", 5) == 0)
 	{
@@ -157,6 +178,20 @@ int QDPAnalyzeColorCommand(PCWSTR pszCmd, ARGB* pargb)
 		*pargb = (ARGB)ll;
 		return QDPE_OK;
 	}
+}
+
+SIZE_T __stdcall QDPGetObjCount(int i)
+{
+	switch (i)
+	{
+	case 0:
+		return  m_Pens.size();
+	case 1:
+		return m_Brushes.size();
+	case 2:
+		return m_Fonts.size();
+	}
+	return 0u;
 }
 
 BOOL GetParamList(PCWSTR pszParamListStart, eck::CRefStrW& rs, std::vector<PWSTR>& aResult)
@@ -250,12 +285,7 @@ struct QDPDRAWIMAGE
 	QDPBIN Bin;
 };
 
-struct QDPLISTPEN
-{
-	GpBitmap* pBitmap;
-};
-
-struct QDPLISTBRUSH
+struct QDPLISTOBJ
 {
 	GpBitmap* pBitmap;
 };
@@ -263,6 +293,22 @@ struct QDPLISTBRUSH
 struct QDPGETOBJCOUNT
 {
 	SIZE_T cObj;
+};
+
+struct QDPGETSTRINGSIZE
+{
+	PCWSTR pszText;
+	int cx;
+	int cy;
+	int cchFitted;
+	int cLinesFilled;
+};
+
+struct QDPREMOVECLR
+{
+	QDPBIN Bin;
+	GpBitmap* pBitmap;
+	HBITMAP hBitmap;
 };
 
 
@@ -288,6 +334,23 @@ BOOL ToBool(PCWSTR pszText)
 	return wcsncmp(pszText, L"真", 1) == 0 || wcsnicmp(pszText, L"true", 4) == 0;
 }
 
+PWSTR GpMatrixToString(GpMatrix* pMatrix, int& cch)
+{
+	eck::CRefStrW rs;
+	rs.Reserve(30);
+	rs.DupString(L"{");
+	REAL fElem[6];
+	GdipGetMatrixElements(pMatrix, fElem);
+	for (auto x : fElem)
+	{
+		rs.PushBack(eck::ToStr(x));
+		rs.PushBack(L",");
+	}
+	rs[rs.m_cchText - 1] = L'}';
+	cch = rs.m_cchText;
+	return rs.Detach();
+}
+
 int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 {
 	QDPDECLCMD(Brush);
@@ -310,18 +373,29 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 	QDPDECLCMD(FillPolygon);
 	QDPDECLCMD(GetImageSize);
 	QDPDECLCMD(DrawImage);
-	QDPDECLCMD(GetPenCount);
-	QDPDECLCMD(GetBrushCount);
+	QDPDECLCMD(GetObjCount);
 	QDPDECLCMD(Clear);
 	QDPDECLCMD(SetTransform);
 	QDPDECLCMD(MultiplyTransform);
 	QDPDECLCMD(FillText);
 	QDPDECLCMD(Font);
+	QDPDECLCMD(SelFont);
+	QDPDECLCMD(ListFont);
+	QDPDECLCMD(ReSize); 
+	QDPDECLCMD(MatrixTranslate);
+	QDPDECLCMD(MatrixShear);
+	QDPDECLCMD(MatrixRotate);
+	QDPDECLCMD(MatrixScale);
+	QDPDECLCMD(MatrixInvert);
+	QDPDECLCMD(GetStringSize);
+	QDPDECLCMD(DelBrush);
+	QDPDECLCMD(DelPen);
+	QDPDECLCMD(DelFont);
 
 	int x1, y1, x2, y2;
 	int iRet;
 	int cxPen;
-	float f1, f2;
+	REAL f1, f2;
 	ARGB argb1, argb2;
 
 	eck::CRefStrW rsTemp{};
@@ -329,18 +403,58 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 	std::vector<GpPoint> aPoints{};
 	std::vector<REAL> aFloat; {};
 	//////////////////////////////////////////
-	if (wcsncmp(pszCmd, szCmd_Brush, cchCmd_Brush) == 0)
+	if (wcsncmp(pszCmd, szCmd_ReSize, cchCmd_ReSize) == 0)
+	{
+		GetParamList(pszCmd + cchCmd_ReSize, rsTemp, aResult);
+		if (aResult.size() != 2)
+			return QDPE_PARAM_COUNT;
+		x1 = _wtoi(aResult[0]);
+		y1 = _wtoi(aResult[1]);
+		if (x1 <= 0 || y1 <= 0)
+			return QDPE_INVALID_PARAM;
+		constexpr int
+			c_cxMax = 1000,
+			c_cyMax = 1000;
+		if (x1 > c_cxMax || y1 > c_cyMax)
+			return QDPE_SO_LARGE_SIZE;
+
+		QDPInitDrawPanel(x1, y1);
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_Brush, cchCmd_Brush) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_Brush, rsTemp, aResult);
-		if (aResult.size() != 1)
-			return QDPE_PARAM_COUNT;
-		iRet = QDPAnalyzeColorCommand(aResult[0], &argb1);
-		if (iRet != QDPE_OK)
-			return iRet;
-		GpSolidFill* pBrush;
-		GdipCreateSolidFill(argb1, &pBrush);
-		m_Brushes.push_back(pBrush);
+		switch (aResult.size())
+		{
+		case 1u:
+		{
+			iRet = QDPAnalyzeColorCommand(aResult[0], &argb1);
+			if (iRet != QDPE_OK)
+				return iRet;
+			GpSolidFill* pBrush;
+			GdipCreateSolidFill(argb1, &pBrush);
+			m_Brushes.push_back(pBrush);
+		}
 		return QDPE_OK;
+		case 6u:
+		{
+			iRet = QDPAnalyzeColorCommand(aResult[4], &argb1);
+			if (iRet != QDPE_OK)
+				return iRet;
+			iRet = QDPAnalyzeColorCommand(aResult[5], &argb2);
+			if (iRet != QDPE_OK)
+				return iRet;
+
+			GpPoint
+				pt1{ _wtoi(aResult[0]),_wtoi(aResult[1]) },
+				pt2{ _wtoi(aResult[2]),_wtoi(aResult[3]) };
+			GpLineGradient* pLineGradien;
+			GdipCreateLineBrushI(&pt1, &pt2, argb1, argb2, WrapModeTile, &pLineGradien);
+			m_Brushes.push_back(pLineGradien);
+		}
+		return QDPE_OK;
+		}
+		return QDPE_PARAM_COUNT;
 	}
 	else if (wcsncmp(pszCmd, szCmd_Pen, cchCmd_Pen) == 0)
 	{
@@ -349,11 +463,15 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return QDPE_PARAM_COUNT;
 
 		cxPen = _wtoi(aResult[1]);
+		if (cxPen < 0.f || cxPen>500.f)
+			return QDPE_INVALID_PARAM;
 		iRet = QDPAnalyzeColorCommand(aResult[0], &argb1);
 		if (iRet != QDPE_OK)
 			return iRet;
 		GpPen* pPen;
-		GdipCreatePen1(argb1, (REAL)cxPen, UnitWorld, &pPen);
+		GdipCreatePen1(argb1, (REAL)cxPen, UnitPixel, &pPen);
+		if (!pPen)
+			return QDPE_GDIP_ERROR;
 		m_Pens.push_back(pPen);
 		return QDPE_OK;
 	}
@@ -364,9 +482,14 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return QDPE_PARAM_COUNT;
 		GpFontFamily* pFontFamily;
 		GdipCreateFontFamilyFromName(aResult[0], NULL, &pFontFamily);
+		f1 = (REAL)_wtof(aResult[1]);
+		if (f1 > 600.f || f1 < 0.f)
+			return QDPE_INVALID_PARAM;
 		GpFont* pFont;
-		GdipCreateFont(pFontFamily, (REAL)_wtof(aResult[1]), (GpFontStyle)_wtoi(aResult[2]), UnitWorld, &pFont);
+		GdipCreateFont(pFontFamily, f1, (GpFontStyle)_wtoi(aResult[2]), UnitPixel, &pFont);
 		GdipDeleteFontFamily(pFontFamily);
+		if (!pFont)
+			return QDPE_GDIP_ERROR;
 		m_Fonts.push_back(pFont);
 		return QDPE_OK;
 	}
@@ -438,29 +561,31 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return QDPE_PARAM_COUNT;
 		}
 	}
-	else if (wcsncmp(pszCmd, szCmd_GetPenCount, cchCmd_GetPenCount) == 0)
+	else if (wcsncmp(pszCmd, szCmd_GetObjCount, cchCmd_GetObjCount) == 0)
 	{
+		GetParamList(pszCmd + cchCmd_SetTransform, rsTemp, aResult);
+		if (aResult.size() != 1)
+			return QDPE_PARAM_COUNT;
 		auto pCtx = (QDPGETOBJCOUNT*)lParam;
-		pCtx->cObj = m_Pens.size();
-		return QDPE_OK;
-	}
-	else if (wcsncmp(pszCmd, szCmd_GetBrushCount, cchCmd_GetBrushCount) == 0)
-	{
-		auto pCtx = (QDPGETOBJCOUNT*)lParam;
-		pCtx->cObj = m_Brushes.size();
+		pCtx->cObj = QDPGetObjCount(_wtoi(aResult[0]));
 		return QDPE_OK;
 	}
 	else if (wcsncmp(pszCmd, szCmd_Clear, cchCmd_Clear) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_Clear, rsTemp, aResult);
-		if (aResult.size() != 1)
-			return QDPE_PARAM_COUNT;
-
-		iRet = QDPAnalyzeColorCommand(aResult[0], &argb1);
-		if (iRet != QDPE_OK)
-			return iRet;
-		GdipGraphicsClear(m_pGraphics, argb1);
-		return QDPE_OK;
+		switch (aResult.size())
+		{
+		case 1u:
+			iRet = QDPAnalyzeColorCommand(aResult[0], &argb1);
+			if (iRet != QDPE_OK)
+				return iRet;
+			GdipGraphicsClear(m_pGraphics, argb1);
+			return QDPE_OK;
+		case 0u:
+			GdipGraphicsClear(m_pGraphics, 0xFFFFFFFF);
+			return QDPE_OK;
+		}
+		return QDPE_PARAM_COUNT;
 	}
 	else if (wcsncmp(pszCmd, szCmd_SetTransform, cchCmd_SetTransform) == 0)
 	{
@@ -499,11 +624,157 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipDeleteMatrix(pMatrix);
 		return QDPE_OK;
 	}
+	else if (wcsncmp(pszCmd, szCmd_SelFont, cchCmd_SelFont) == 0)
+	{
+		GetParamList(pszCmd + cchCmd_SelFont, rsTemp, aResult);
+		if (aResult.size() != 1)
+			return QDPE_PARAM_COUNT;
+		iRet = _wtoi(aResult[0]);
+		if (iRet < 0 || iRet >= (int)m_Fonts.size())
+			return QDPE_OUT_OF_RANGE;
+		m_idxCurrFont = iRet;
+		return QDPE_OK;
+	}
+
+	//////////////////////////////////////////矩阵
+	if (wcsncmp(pszCmd, szCmd_MatrixTranslate, cchCmd_MatrixTranslate) == 0)
+	{
+		auto pCtx = (QDPBIN*)lParam;
+		GetParamList(pszCmd + cchCmd_MatrixTranslate, rsTemp, aResult);
+		if (aResult.size() != 2)
+			return QDPE_PARAM_COUNT;
+		GpMatrix* pMatrix;
+		GdipCreateMatrix(&pMatrix);
+		GdipTranslateMatrix(pMatrix, (REAL)_wtof(aResult[0]), (REAL)_wtof(aResult[1]), MatrixOrderAppend);
+		
+		int cch;
+		pCtx->pData = GpMatrixToString(pMatrix, cch);
+		pCtx->cbSize = (cch + 1) * sizeof(WCHAR);
+		GdipDeleteMatrix(pMatrix);
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_MatrixShear, cchCmd_MatrixShear) == 0)
+	{
+		auto pCtx = (QDPBIN*)lParam;
+		GetParamList(pszCmd + cchCmd_MatrixShear, rsTemp, aResult);
+		GpMatrix* pMatrix;
+		switch (aResult.size())
+		{
+		case 2u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			GdipShearMatrix(pMatrix, (REAL)_wtof(aResult[0]), (REAL)_wtof(aResult[1]), MatrixOrderAppend);
+		}
+		break;
+		case 4u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			f1 = (float)_wtof(aResult[0]);
+			f2 = (float)_wtof(aResult[1]);
+			GdipTranslateMatrix(pMatrix, -f1, -f2, MatrixOrderAppend);
+			GdipShearMatrix(pMatrix, (REAL)_wtof(aResult[2]), (REAL)_wtof(aResult[3]), MatrixOrderAppend);
+			GdipTranslateMatrix(pMatrix, f1, f2, MatrixOrderAppend);
+		}
+		break;
+		default:
+			return QDPE_PARAM_COUNT;
+		}
+
+		int cch;
+		pCtx->pData = GpMatrixToString(pMatrix, cch);
+		pCtx->cbSize = (cch + 1) * sizeof(WCHAR);
+		GdipDeleteMatrix(pMatrix);
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_MatrixRotate, cchCmd_MatrixRotate) == 0)
+	{
+		auto pCtx = (QDPBIN*)lParam;
+		GetParamList(pszCmd + cchCmd_MatrixRotate, rsTemp, aResult);
+		GpMatrix* pMatrix;
+		switch (aResult.size())
+		{
+		case 1u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			GdipRotateMatrix(pMatrix, (REAL)_wtof(aResult[0]), MatrixOrderAppend);
+		}
+		break;
+		case 3u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			f1 = (float)_wtof(aResult[0]);
+			f2 = (float)_wtof(aResult[1]);
+			GdipTranslateMatrix(pMatrix, -f1, -f2, MatrixOrderAppend);
+			GdipRotateMatrix(pMatrix, (REAL)_wtof(aResult[2]), MatrixOrderAppend);
+			GdipTranslateMatrix(pMatrix, f1, f2, MatrixOrderAppend);
+		}
+		break;
+		default:
+			return QDPE_PARAM_COUNT;
+		}
+
+		int cch;
+		pCtx->pData = GpMatrixToString(pMatrix, cch);
+		pCtx->cbSize = (cch + 1) * sizeof(WCHAR);
+		GdipDeleteMatrix(pMatrix);
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_MatrixScale, cchCmd_MatrixScale) == 0)
+	{
+		auto pCtx = (QDPBIN*)lParam;
+		GetParamList(pszCmd + cchCmd_MatrixScale, rsTemp, aResult);
+		GpMatrix* pMatrix;
+		switch (aResult.size())
+		{
+		case 2u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			GdipScaleMatrix(pMatrix, (REAL)_wtof(aResult[0]), (REAL)_wtof(aResult[1]), MatrixOrderAppend);
+		}
+		break;
+		case 4u:
+		{
+			GdipCreateMatrix(&pMatrix);
+			f1 = (float)_wtof(aResult[0]);
+			f2 = (float)_wtof(aResult[1]);
+			GdipTranslateMatrix(pMatrix, -f1, -f2, MatrixOrderAppend);
+			GdipScaleMatrix(pMatrix, (REAL)_wtof(aResult[2]), (REAL)_wtof(aResult[3]), MatrixOrderAppend);
+			GdipTranslateMatrix(pMatrix, f1, f2, MatrixOrderAppend);
+		}
+		break;
+		default:
+			return QDPE_PARAM_COUNT;
+		}
+
+		int cch;
+		pCtx->pData = GpMatrixToString(pMatrix, cch);
+		pCtx->cbSize = (cch + 1) * sizeof(WCHAR);
+		GdipDeleteMatrix(pMatrix);
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_MatrixInvert, cchCmd_MatrixInvert) == 0)
+	{
+		auto pCtx = (QDPBIN*)lParam;
+		GetParamList(pszCmd + cchCmd_MatrixInvert, rsTemp, aResult);
+		if (aResult.size() != 1)
+			return QDPE_PARAM_COUNT;
+		AnalyzeArrayFloat(aResult[0], aFloat);
+		if (aFloat.size() != 6)
+			return QDPE_PARAM_COUNT;
+		GpMatrix* pMatrix;
+		GdipCreateMatrix2(aFloat[0], aFloat[1], aFloat[2], aFloat[3], aFloat[4], aFloat[5], &pMatrix);
+		GdipInvertMatrix(pMatrix);
+		int cch;
+		pCtx->pData = GpMatrixToString(pMatrix, cch);
+		pCtx->cbSize = (cch + 1) * sizeof(WCHAR);
+		GdipDeleteMatrix(pMatrix);
+		return QDPE_OK;
+	}
 
 	//////////////////////////////////////////下面的指令需要画笔
 	if (wcsncmp(pszCmd, szCmd_ListPen, cchCmd_ListPen) == 0)
 		{
-			auto pCtx = (QDPLISTPEN*)lParam;
+			auto pCtx = (QDPLISTOBJ*)lParam;
 			GetParamList(pszCmd + cchCmd_ListPen, rsTemp, aResult);
 			argb1 = 0xFFFFFFFF;
 			if (aResult.size() == 1)
@@ -542,13 +813,34 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			pCtx->pBitmap = pBitmap;
 			return QDPE_OK;
 		}
+	else if (wcsncmp(pszCmd, szCmd_DelPen, cchCmd_DelPen) == 0)
+	{
+		GetParamList(pszCmd + cchCmd_DelPen, rsTemp, aResult);
+		switch (aResult.size())
+		{
+		case 1u:
+			iRet = _wtoi(aResult[0]);
+			if (iRet < 0 || iRet >= (int)m_Pens.size())
+				return QDPE_OUT_OF_RANGE;
+			GdipDeletePen(m_Pens[iRet]);
+			m_Pens.erase(m_Pens.begin() + iRet);
+			return QDPE_OK;
+		case 0u:
+			for (auto x : m_Pens)
+				GdipDeletePen(x);
+			m_Pens.clear();
+			m_idxCurrPen = -1;
+			return QDPE_OK;
+		}
+		return QDPE_PARAM_COUNT;
+	}
 	else if (wcsncmp(pszCmd, szCmd_SelPen, cchCmd_SelPen) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_SelPen, rsTemp, aResult);
 		if (aResult.size() != 1)
 			return QDPE_PARAM_COUNT;
 		iRet = _wtoi(aResult[0]);
-		if (iRet < 0 || iRet >(int)m_Pens.size())
+		if (iRet < 0 || iRet >= (int)m_Pens.size())
 			return QDPE_OUT_OF_RANGE;
 		m_idxCurrPen = iRet;
 		return QDPE_OK;
@@ -660,11 +952,11 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipDrawPolygonI(m_pGraphics, m_Pens[m_idxCurrPen], aPoints.data(), (int)aPoints.size());
 		return QDPE_OK;
 	}
-	
+
 	//////////////////////////////////////////下面的指令需要画刷
 	if (wcsncmp(pszCmd, szCmd_ListBrush, cchCmd_ListBrush) == 0)
 	{
-		auto pCtx = (QDPLISTBRUSH*)lParam;
+		auto pCtx = (QDPLISTOBJ*)lParam;
 		GetParamList(pszCmd + cchCmd_ListBrush, rsTemp, aResult);
 		argb1 = 0xFFFFFFFF;
 		if (aResult.size() == 1)
@@ -680,7 +972,7 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			c_cxPadding = 10,
 			c_cxBitmap = 100,
 			c_cyBlock = 20;
-		int cy = (int)m_Brushes.size() * (c_cyBlock + c_cyPadding) + c_cyPadding;
+		int cy = ((int)m_Brushes.size() * (c_cyBlock + c_cyPadding)) + c_cyPadding;
 
 		GpBitmap* pBitmap;
 		GpGraphics* pGraphics;
@@ -690,12 +982,33 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		int y = c_cyPadding;
 		for (auto p : m_Brushes)
 		{
-			GdipFillRectangleI(pGraphics, p, c_cxPadding, y, c_cxBitmap - c_cxPadding, y + c_cyBlock);
+			GdipFillRectangleI(pGraphics, p, c_cxPadding, y, c_cxBitmap - c_cxPadding * 2, c_cyBlock);
 			y += (c_cyPadding + c_cyBlock);
 		}
 		GdipDeleteGraphics(pGraphics);
 		pCtx->pBitmap = pBitmap;
 		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_DelBrush, cchCmd_DelBrush) == 0)
+	{
+		GetParamList(pszCmd + cchCmd_DelBrush, rsTemp, aResult);
+		switch (aResult.size())
+		{
+		case 1u:
+			iRet = _wtoi(aResult[0]);
+			if (iRet < 0 || iRet >= (int)m_Brushes.size())
+				return QDPE_OUT_OF_RANGE;
+			GdipDeleteBrush(m_Brushes[iRet]);
+			m_Brushes.erase(m_Brushes.begin() + iRet);
+			return QDPE_OK;
+		case 0u:
+			for (auto x : m_Brushes)
+				GdipDeleteBrush(x);
+			m_Brushes.clear();
+			m_idxCurrBrush = -1;
+			return QDPE_OK;
+		}
+		return QDPE_PARAM_COUNT;
 	}
 	else if (wcsncmp(pszCmd, szCmd_SelBrush, cchCmd_SelBrush) == 0)
 	{
@@ -703,7 +1016,7 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		if (aResult.size() != 1)
 			return QDPE_PARAM_COUNT;
 		iRet = _wtoi(aResult[0]);
-		if (iRet < 0 || iRet >(int)m_Brushes.size())
+		if (iRet < 0 || iRet >= (int)m_Brushes.size())
 			return QDPE_OUT_OF_RANGE;
 		m_idxCurrBrush = iRet;
 		return QDPE_OK;
@@ -791,31 +1104,131 @@ int __stdcall QDPExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipSetStringFormatAlign(pStringFormat, (StringAlignment)_wtoi(aResult[5]));
 		GdipSetStringFormatLineAlign(pStringFormat, (StringAlignment)_wtoi(aResult[6]));
 		
-		GdipDrawString(m_pGraphics, pszText, (int)wcslen(pszText), m_Fonts[m_idxCurrFont], 
+		GdipDrawString(m_pGraphics, pszText, -1, m_Fonts[m_idxCurrFont], 
 			&rcF, pStringFormat, m_Brushes[m_idxCurrBrush]);
 		GdipDeleteStringFormat(pStringFormat);
 		return QDPE_OK;
+	}
+
+	//////////////////////////////////////////下面的指令需要字体
+	if (wcsncmp(pszCmd, szCmd_ListFont, cchCmd_ListFont) == 0)
+	{
+		auto pCtx = (QDPLISTOBJ*)lParam;
+
+		constexpr int
+			c_cyPadding = 12,
+			c_cxPadding = 10;
+		constexpr PCWSTR c_pszTest = L"字体 Font 123 ";
+		int cy = (((int)m_Brushes.size()) + 1) * c_cyPadding;
+
+		GpRectF rcF{ 0,0,1000.f,500.f }, rcF2;
+
+		GpStringFormat* pStringFormat;
+		GdipCreateStringFormat(StringFormatFlagsNoClip | StringFormatFlagsMeasureTrailingSpaces, LANG_NEUTRAL, &pStringFormat);
+		GdipSetStringFormatLineAlign(pStringFormat, StringAlignmentCenter);
+
+		std::vector<REAL> aHeight(m_Fonts.size());
+
+		int cx = INT_MIN;
+		EckCounter(m_Fonts.size(), i)
+		{
+			GdipMeasureString(m_pGraphics, c_pszTest, -1, m_Fonts[i], &rcF, pStringFormat, &rcF2, NULL, NULL);
+			aHeight[i] = rcF2.Height;
+			cy += (int)rcF2.Height;
+			if (cx < (int)rcF2.Width)
+				cx = (int)rcF2.Width;
+		}
+
+		GpBitmap* pBitmap;
+		GpGraphics* pGraphics;
+		GdipCreateBitmapFromScan0(cx, cy, 0, PixelFormat32bppPARGB, NULL, &pBitmap);
+		GdipGetImageGraphicsContext(pBitmap, &pGraphics);
+		GdipGraphicsClear(pGraphics, 0xFFFFFFFF);
+		int y = c_cyPadding;
+		rcF = { 0,0,(REAL)cx,0 };
+
+		GpSolidFill* pBrush;
+		GdipCreateSolidFill(0xFF000000, &pBrush);
+
+		EckCounter(m_Fonts.size(), i)
+		{
+			rcF.Top = (REAL)y;
+			rcF.Height = aHeight[i];
+			GdipDrawString(pGraphics, c_pszTest, -1, m_Fonts[i], &rcF, pStringFormat, pBrush);
+
+			y += ((int)rcF.Height + c_cyPadding);
+		}
+		GdipDeleteStringFormat(pStringFormat);
+		GdipDeleteBrush(pBrush);
+		GdipDeleteGraphics(pGraphics);
+		pCtx->pBitmap = pBitmap;
+		return QDPE_OK;
+	}
+	else if (wcsncmp(pszCmd, szCmd_DelFont, cchCmd_DelFont) == 0)
+	{
+		GetParamList(pszCmd + cchCmd_DelFont, rsTemp, aResult);
+		switch (aResult.size())
+		{
+		case 1u:
+			iRet = _wtoi(aResult[0]);
+			if (iRet < 0 || iRet >= (int)m_Fonts.size())
+				return QDPE_OUT_OF_RANGE;
+			GdipDeleteFont(m_Fonts[iRet]);
+			m_Fonts.erase(m_Fonts.begin() + iRet);
+			return QDPE_OK;
+		case 0u:
+			for (auto x : m_Fonts)
+				GdipDeleteFont(x);
+			m_Fonts.clear();
+			m_idxCurrFont = -1;
+			return QDPE_OK;
+		}
+		return QDPE_PARAM_COUNT;
+	}
+	if (wcsncmp(pszCmd, szCmd_GetStringSize, cchCmd_GetStringSize) == 0)
+	{
+		auto pCtx = (QDPGETSTRINGSIZE*)lParam;
+		if (m_idxCurrFont >= m_Fonts.size())
+			return QDPE_NO_FONT;
+		GetParamList(pszCmd + cchCmd_GetStringSize, rsTemp, aResult);
+		if (aResult.size() != 7)
+			return QDPE_PARAM_COUNT;
+
+		GpRectF rcF{ (REAL)_wtof(aResult[0]),(REAL)_wtof(aResult[1]),(REAL)_wtof(aResult[2]),(REAL)_wtof(aResult[3]) }, rcF2;
+		GpStringFormat* pStringFormat;
+		GdipCreateStringFormat(ToBool(aResult[4]) ? (GpStringFormatFlags)0 : StringFormatFlagsNoWrap,
+			LANG_NEUTRAL, & pStringFormat);
+		GdipSetStringFormatAlign(pStringFormat, (StringAlignment)_wtoi(aResult[5]));
+		GdipSetStringFormatLineAlign(pStringFormat, (StringAlignment)_wtoi(aResult[6]));
+
+		GdipMeasureString(m_pGraphics, pCtx->pszText, -1, m_Fonts[m_idxCurrFont],
+			&rcF, pStringFormat, &rcF2, &pCtx->cchFitted, &pCtx->cLinesFilled);
+		pCtx->cx = (int)rcF2.Width;
+		pCtx->cy = (int)rcF2.Height;
+		GdipDeleteStringFormat(pStringFormat);
 	}
 	return QDPE_INVALID_CMD;
 }
 
 IStream* __stdcall QDPGetImageData(GpBitmap* pBitmap)
 {
+	BOOL bNeedFree = FALSE;
 	if (!pBitmap)
 	{
-		BITMAP bmp;
-		GetObjectW(m_hBitmap, sizeof(bmp), &bmp);
 		GdipCreateBitmapFromHBITMAP(m_hBitmap, NULL, &pBitmap);
+		bNeedFree = TRUE;
 	}
 	IStream* pStream = SHCreateMemStream(NULL, 0);
 	if (GdipSaveImageToStream(pBitmap, pStream, &m_clsidPngEncoder, NULL) != Ok)
 	{
-		GdipDisposeImage(pBitmap);
+		if (bNeedFree)
+			GdipDisposeImage(pBitmap);
 		pStream->Release();
 		return NULL;
 	}
 
-	GdipDisposeImage(pBitmap);
+	if (bNeedFree)
+		GdipDisposeImage(pBitmap);
 	return pStream;
 }
 
@@ -843,16 +1256,7 @@ void __stdcall QDPDestroyImage(GpImage* pImage)
 	GdipDisposeImage(pImage);
 }
 
-SIZE_T __stdcall QDPGetObjCount(int i)
+void __stdcall QDPFreeRefStr(PWSTR psz)
 {
-	switch (i)
-	{
-	case 0:
-		return  m_Pens.size();
-	case 1:
-		return m_Brushes.size();
-	case 2:
-		return m_Fonts.size();
-	}
-	return 0u;
+	eck::CRefStrW::TAlloc::Free(psz);
 }
