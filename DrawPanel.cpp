@@ -131,8 +131,6 @@ BOOL __stdcall QDPInit()
 
 BOOL __stdcall QDPInitDrawPanel(int cx, int cy)
 {
-	QDPUnInit();
-
 	HDC hDC = GetDC(NULL);
 	m_hCDC = CreateCompatibleDC(hDC);
 	m_hBitmap = CreateCompatibleBitmap(hDC, cx, cy);

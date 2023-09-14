@@ -75,7 +75,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>D:\%40重要文件\%40我的工程\WinEzCtrlKit\eck;$(IncludePath)</IncludePath>
-    <OutDir>F:\下载\梦幻框架 8.9.2\梦幻框架\Drea Robot\app\</OutDir>
+    <OutDir>F:\@QQ文件\639582106\FileRecv\QYBot_V2.6.4\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <IncludePath>D:\%40重要文件\%40我的工程\WinEzCtrlKit\eck;$(IncludePath)</IncludePath>
