@@ -1,13 +1,11 @@
 EXPORTS
-	QDPInit
-	QDPUnInit
-	QDPInitDrawPanel
-	QDPAnalyzeColorCommand
-	QDPExecuteCommand
-	QDPGetImageData
-	QDPGetStreamSize
-	QDPGetStreamData
-	QDPReleaseIUnknown
-	QDPDestroyImage
-	QDPGetObjCount
-	QDPFreeRefStr
+	CDPInit
+	CDPUnInit
+	CDPCreateDrawPanel
+	CDPDestroyDrawPanel
+	CDPGetObjCount
+	CDPExecuteCommand
+	CDPExecuteCommand2
+	CDPDestroyStr
+	CDPDestroyBin
+	CDPGetContent
