@@ -35,6 +35,8 @@ enum CDPError
 	CDPE_SO_LARGE_SIZE,
 	CDPE_GDIP_ERROR,
 	CDPE_INVALID_MEDIUM,
+	CDPE_INVALID_IMAGE,
+	CDPE_URL_REQUEST_FAILED,
 
 	CDPE_END_,
 };
@@ -69,6 +71,7 @@ constexpr inline PCWSTR c_pszErrInfo[]
 	L"无效指令",
 	L"无字体",
 	L"给定的图面尺寸太大",
+	L"URL请求失败",
 };
 
 __forceinline PCWSTR CdpGetErrInfo(int i)

@@ -2,60 +2,6 @@
 #include "pch.h"
 #include "CDPDefine.h"
 
-struct DpStr
-{
-	BOOL bRefStr;
-	union
-	{
-		eck::CRefStrW rs;
-		CDPSTR str;
-		BYTE byDummy[std::max(sizeof(rs), sizeof(str))];
-	};
-
-	DpStr() :bRefStr{ FALSE }, byDummy{}
-	{
-	}
-
-	~DpStr()
-	{
-		if (bRefStr)
-			rs.~CRefStrT();
-		else
-			if (str.cchAlloc && str.psz)
-				eck::TRefStrDefAlloc<WCHAR>{}.deallocate(str.psz, str.cchAlloc);
-	}
-
-	ECK_DISABLE_COPY_MOVE(DpStr);
-
-	EckInline void From(eck::CRefStrW& rs)
-	{
-		if (bRefStr)
-			rs = std::move(rs);
-		else
-			str.psz = rs.Detach(str.cchAlloc, str.cch);
-	}
-
-	EckInline void From(const CDPSTR& s)
-	{
-		if (bRefStr)
-			rs.Attach(s.psz, s.cchAlloc, s.cch);
-		else
-			str = s;
-	}
-
-	EckInline void Clear()
-	{
-		if (bRefStr)
-			rs.Clear();
-		else
-		{
-			if (str.cchAlloc && str.psz)
-				eck::TRefStrDefAlloc<WCHAR>{}.deallocate(str.psz, str.cchAlloc);
-			str = {};
-		}
-	}
-};
-
 class CDrawPanel
 {
 private:
@@ -127,6 +73,17 @@ public:
 		return bin;
 	}
 
+	void SaveImage(PCWSTR pszFile, int i)
+	{
+		if (i < CDPIT_BEGIN_ || i >= CDPIT_END_)
+			return;
+		eck::ImageType Type[]{ eck::ImageType::Bmp,eck::ImageType::Png,eck::ImageType::Jpeg };
+		GpBitmap* pBitmap;
+		GdipCreateBitmapFromScan0(m_cx, m_cy, m_Bmp.bmWidthBytes, PixelFormat32bppARGB,
+			(BYTE*)m_Bmp.bmBits, &pBitmap);
+		eck::SaveGpImage(pszFile, pBitmap, Type[i]);
+	}
+
 	HBITMAP CloneImageToHBITMAP()
 	{
 		eck::CDib dib{};
@@ -146,7 +103,10 @@ public:
 	}
 
 	int ExecuteCommand(PCWSTR pszCmd, const CDPIMAGE* pImgIn,
-		CDPSTR& sDisplay, CDPIMAGE* pImgOut, CDPImageMedium eMedium);
+		CDPSTR& sDisplay, CDPImageMedium eMedium);
+
+	int ExecuteCommandUrl(PCWSTR pszCmd, PCWSTR pszImageUrl,
+		CDPSTR& sDisplay);
 };
 
 #define CDPDECLCMD(CmdName)						\
@@ -155,3 +115,5 @@ public:
 							ECKTOSTRW(CmdName)	\
 							L"("  };			\
 		constexpr static int cchCmd_##CmdName = (int)ARRAYSIZE(szCmd_##CmdName) - 1;
+
+#define CDPCmdEqu(x) (wcsncmp(pszCmd, szCmd_##x, cchCmd_##x) == 0)

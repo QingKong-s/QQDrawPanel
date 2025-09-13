@@ -1,5 +1,7 @@
 ﻿#include "pch.h"
 #include "CDrawPanel.h"
+#include "eck\GeometryRender.h"
+#include "eck\NetworkHelper.h"
 
 #pragma region 命令定义
 CDPDECLCMD(Brush);
@@ -40,6 +42,10 @@ CDPDECLCMD(GetStringSize);
 CDPDECLCMD(DelBrush);
 CDPDECLCMD(DelPen);
 CDPDECLCMD(DelFont);
+CDPDECLCMD(DrawSpirograph);
+CDPDECLCMD(DrawButterflyCurve);
+CDPDECLCMD(DrawRoseCurve);
+CDPDECLCMD(DrawDistortImage);
 #pragma endregion 命令定义
 
 EckInline BOOL ToBool(PCWSTR pszText)
@@ -157,9 +163,7 @@ static void AnalyzeArrayPoint(PCWSTR psz, std::vector<GpPoint>& aResult)
 	std::vector<PWSTR> aMember{};
 	eck::SplitStr(rs.Data(), L",", aMember, 0, rs.Size(), 1);
 	for (SIZE_T i = 0; i < aMember.size(); i += 2)
-	{
-		aResult.push_back({ _wtoi(aMember[i]),_wtoi(aMember[i + 1]) });
-	}
+		aResult.emplace_back(_wtoi(aMember[i]),_wtoi(aMember[i + 1]));
 }
 
 static void AnalyzeArrayFloat(PCWSTR psz, std::vector<REAL>& aResult)
@@ -171,9 +175,7 @@ static void AnalyzeArrayFloat(PCWSTR psz, std::vector<REAL>& aResult)
 	std::vector<PWSTR> aMember{};
 	eck::SplitStr(rs.Data(), L",", aMember, 0, rs.Size(), 1);
 	EckCounter(aMember.size(), i)
-	{
-		aResult.push_back((float)_wtof(aMember[i]));
-	}
+		aResult.emplace_back((float)_wtof(aMember[i]));
 }
 
 static GpBitmap* CreateBitmapFromCDPBIN(const CDPBIN& Bin)
@@ -183,6 +185,57 @@ static GpBitmap* CreateBitmapFromCDPBIN(const CDPBIN& Bin)
 	GdipCreateBitmapFromStream(pStream, &pBitmap);
 	pStream->Release();
 	return pBitmap;
+}
+
+static GpBitmap* GpBitmapFromCDPIMAGE(const CDPIMAGE& Img, BOOL& bNeedDel)
+{
+	bNeedDel = FALSE;
+	switch (Img.eMedium)
+	{
+	case CDPIM_BIN:
+		bNeedDel = TRUE;
+		return CreateBitmapFromCDPBIN(Img.Bin);
+	case CDPIM_HBITMAP:
+	{
+		bNeedDel = TRUE;
+		BITMAP bmp;
+		GetObjectW(Img.hbm, sizeof(bmp), &bmp);
+		GpBitmap* pBitmap;
+		if (bmp.bmBits && bmp.bmBitsPixel == 32)
+			GdipCreateBitmapFromScan0(bmp.bmWidth, bmp.bmHeight, bmp.bmWidthBytes, PixelFormat32bppARGB,
+				(BYTE*)bmp.bmBits, &pBitmap);
+		else
+			GdipCreateBitmapFromHBITMAP(Img.hbm, NULL, &pBitmap);
+		return pBitmap;
+	}
+	break;
+
+	case CDPIM_GPIMAGE:
+		return Img.pBitmap;
+	}
+	return NULL;
+}
+
+static HBITMAP HBITMAPFromCDPIMAGE(const CDPIMAGE& Img, BOOL& bNeedDel)
+{
+	bNeedDel = FALSE;
+	switch (Img.eMedium)
+	{
+	case CDPIM_BIN:
+		bNeedDel = TRUE;
+		return eck::CreateHBITMAP(Img.Bin.pData, Img.Bin.cb);
+	case CDPIM_HBITMAP:
+		return Img.hbm;
+
+	case CDPIM_GPIMAGE:
+	{
+		bNeedDel = TRUE;
+		HBITMAP hbm;
+		GdipCreateHBITMAPFromBitmap(Img.pBitmap, &hbm, 0);
+		return hbm;
+	}
+	}
+	return NULL;
 }
 
 
@@ -278,9 +331,9 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 	eck::CRefStrW rsTemp{};
 	std::vector<PWSTR> aResult{};
 	std::vector<GpPoint> aPoints{};
-	std::vector<REAL> aFloat; {};
+	std::vector<REAL> aFloat{};
 	//////////////////////////////////////////
-	/* */if (wcsncmp(pszCmd, szCmd_ReSize, cchCmd_ReSize) == 0)
+	if (wcsncmp(pszCmd, szCmd_ReSize, cchCmd_ReSize) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_ReSize, rsTemp, aResult);
 		if (aResult.size() != 2)
@@ -400,41 +453,15 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipGetImageHeight(pBitmap, &pCtx->cy);
 		GdipDisposeImage(pBitmap);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawImage, cchCmd_DrawImage) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_DrawImage, rsTemp, aResult);
 		auto pCtx = (CDPDRAWIMAGE*)lParam;
-		GpBitmap* pBitmap;
-		BOOL bDel = FALSE;
 
-		switch (pCtx->Img.eMedium)
-		{
-		case CDPIM_BIN:
-			bDel = TRUE;
-			pBitmap = CreateBitmapFromCDPBIN(pCtx->Img.Bin);
-			break;
-		case CDPIM_HBITMAP:
-		{
-			bDel = TRUE;
-			BITMAP bmp;
-			GetObjectW(pCtx->Img.hbm, sizeof(bmp), &bmp);
-			if (bmp.bmBits && bmp.bmBitsPixel == 32)
-				GdipCreateBitmapFromScan0(m_cx, m_cy, bmp.bmWidthBytes, PixelFormat32bppARGB,
-					(BYTE*)bmp.bmBits, &pBitmap);
-			else
-				GdipCreateBitmapFromHBITMAP(pCtx->Img.hbm, NULL, &pBitmap);
-		}
-		break;
+		BOOL bDel;
+		GpBitmap* pBitmap = GpBitmapFromCDPIMAGE(pCtx->Img, bDel);
 
-		case CDPIM_GPIMAGE:
-			pBitmap = pCtx->Img.pBitmap;
-			break;
-
-		default:
-			pBitmap = NULL;
-			break;
-		}
 		if (!pBitmap)
 			return CDPE_INVALID_PARAM;
 		ResetBitmapDpi(pBitmap);
@@ -463,7 +490,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		if (bDel)
 			GdipDisposeImage(pBitmap);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_GetObjCount, cchCmd_GetObjCount) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_GetObjCount, rsTemp, aResult);
@@ -472,7 +499,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		auto pCtx = (QDPGETOBJCOUNT*)lParam;
 		pCtx->cObj = GetObjCount(_wtoi(aResult[0]));
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_Clear, cchCmd_Clear) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_Clear, rsTemp, aResult);
@@ -489,7 +516,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OK;
 		}
 		return CDPE_PARAM_COUNT;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_SetTransform, cchCmd_SetTransform) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_SetTransform, rsTemp, aResult);
@@ -512,7 +539,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		default:
 			return CDPE_PARAM_COUNT;
 		}
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_MultiplyTransform, cchCmd_MultiplyTransform) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_MultiplyTransform, rsTemp, aResult);
@@ -526,7 +553,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipMultiplyWorldTransform(m_pGraphics, pMatrix, (Gdiplus::MatrixOrder)_wtoi(aResult[1]));
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_SelFont, cchCmd_SelFont) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_SelFont, rsTemp, aResult);
@@ -537,8 +564,37 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OUT_OF_RANGE;
 		m_idxCurrFont = iRet;
 		return CDPE_OK;
-		}
-		//////////////////////////////////////////矩阵
+	}
+	else if (CDPCmdEqu(DrawDistortImage))
+	{
+		const auto pCtx = (CDPIMAGE*)lParam;
+		if (m_idxCurrPen >= m_Pens.size())
+			return CDPE_NO_PEN;
+		GetParamList(pszCmd + cchCmd_DrawDistortImage, rsTemp, aResult);
+		if (aResult.size() != 1)
+			return CDPE_PARAM_COUNT;
+		AnalyzeArrayPoint(aResult[0], aPoints);
+		if (aPoints.size() != 4)
+			return CDPE_PARAM_COUNT;
+
+		BOOL bDel;
+		const auto pBitmap = GpBitmapFromCDPIMAGE(*pCtx, bDel);
+		if (!pBitmap)
+			return CDPE_INVALID_IMAGE;
+
+		eck::CMifptpGpBitmap Input(pBitmap);
+		eck::CMifptpGpBitmap Output{};
+
+		int cx, cy;
+		GdipGetImageWidth(pBitmap, (UINT*)&cx);
+		GdipGetImageHeight(pBitmap, (UINT*)&cy);
+		GpPoint ptSrc[4]{ {},{cx,0},{0,cy},{cx,cy} };
+
+		eck::MakeImageFromPolygonToPolygon(Input, Output, ptSrc, aPoints.data(), 4);
+		GdipDrawImageI(m_pGraphics, Output.GetGpBitmap(), 0, 0);
+		return CDPE_OK;
+	}
+	//////////////////////////////////////////矩阵
 	else if (wcsncmp(pszCmd, szCmd_MatrixTranslate, cchCmd_MatrixTranslate) == 0)
 	{
 		auto pCtx = (CDPSTR*)lParam;
@@ -553,7 +609,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		*pCtx = RefStrToCdpStr(rs);
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_MatrixShear, cchCmd_MatrixShear) == 0)
 	{
 		auto pCtx = (CDPSTR*)lParam;
@@ -584,7 +640,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		*pCtx = RefStrToCdpStr(rs);
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_MatrixRotate, cchCmd_MatrixRotate) == 0)
 	{
 		auto pCtx = (CDPSTR*)lParam;
@@ -616,7 +672,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		*pCtx = RefStrToCdpStr(rs);
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_MatrixScale, cchCmd_MatrixScale) == 0)
 	{
 		auto pCtx = (CDPSTR*)lParam;
@@ -648,7 +704,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		*pCtx = RefStrToCdpStr(rs);
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_MatrixInvert, cchCmd_MatrixInvert) == 0)
 	{
 		auto pCtx = (CDPSTR*)lParam;
@@ -666,8 +722,8 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		*pCtx = RefStrToCdpStr(rs);
 		GdipDeleteMatrix(pMatrix);
 		return CDPE_OK;
-		}
-		//////////////////////////////////////////下面的指令需要画笔
+	}
+	//////////////////////////////////////////下面的指令需要画笔
 	else if (wcsncmp(pszCmd, szCmd_ListPen, cchCmd_ListPen) == 0)
 	{
 		auto pCtx = (QDPLISTOBJ*)lParam;
@@ -708,7 +764,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipDeleteGraphics(pGraphics);
 		pCtx->pBitmap = pBitmap;
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DelPen, cchCmd_DelPen) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_DelPen, rsTemp, aResult);
@@ -729,7 +785,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OK;
 		}
 		return CDPE_PARAM_COUNT;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_SelPen, cchCmd_SelPen) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_SelPen, rsTemp, aResult);
@@ -740,7 +796,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OUT_OF_RANGE;
 		m_idxCurrPen = iRet;
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawLine, cchCmd_DrawLine) == 0)// .DrawLine(x1,y1,x2,y2,clr,width)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -755,7 +811,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipDrawLineI(m_pGraphics, m_Pens[m_idxCurrPen], x1, y1, x2, y2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawPolyLine, cchCmd_DrawPolyLine) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -768,7 +824,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_NULL_ARRAY;
 		auto i = GdipDrawLinesI(m_pGraphics, m_Pens[m_idxCurrPen], aPoints.data(), (int)aPoints.size());
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawRect, cchCmd_DrawRect) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -783,7 +839,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipDrawRectangleI(m_pGraphics, m_Pens[m_idxCurrPen], x1, y1, x2, y2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawArc, cchCmd_DrawArc) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -801,7 +857,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipDrawArcI(m_pGraphics, m_Pens[m_idxCurrPen], x1, y1, x2, y2, f1, f2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawEllipse, cchCmd_DrawEllipse) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -816,7 +872,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipDrawEllipseI(m_pGraphics, m_Pens[m_idxCurrPen], x1, y1, x2, y2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawPie, cchCmd_DrawPie) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -834,7 +890,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipDrawPieI(m_pGraphics, m_Pens[m_idxCurrPen], x1, y1, x2, y2, f1, f2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DrawPolygon, cchCmd_DrawPolygon) == 0)
 	{
 		if (m_idxCurrPen >= m_Pens.size())
@@ -847,8 +903,50 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_NULL_ARRAY;
 		GdipDrawPolygonI(m_pGraphics, m_Pens[m_idxCurrPen], aPoints.data(), (int)aPoints.size());
 		return CDPE_OK;
-		}
-		//////////////////////////////////////////下面的指令需要画刷
+	}
+	else if (CDPCmdEqu(DrawSpirograph))
+	{
+		if (m_idxCurrPen >= m_Pens.size())
+			return CDPE_NO_PEN;
+		GetParamList(pszCmd + cchCmd_DrawSpirograph, rsTemp, aResult);
+		if (aResult.size() != 6)
+			return CDPE_PARAM_COUNT;
+		eck::DrawSpirograph(m_pGraphics, m_Pens[m_idxCurrPen],
+			(float)_wtof(aResult[0]), (float)_wtof(aResult[1]),
+			(float)_wtof(aResult[2]), (float)_wtof(aResult[3]),
+			(float)_wtof(aResult[4]),
+			(float)_wtof(aResult[5]));
+		return CDPE_OK;
+	}
+	else if (CDPCmdEqu(DrawButterflyCurve))
+	{
+		if (m_idxCurrPen >= m_Pens.size())
+			return CDPE_NO_PEN;
+		GetParamList(pszCmd + cchCmd_DrawButterflyCurve, rsTemp, aResult);
+		if (aResult.size() != 6)
+			return CDPE_PARAM_COUNT;
+		eck::DrawButterflyCurve(m_pGraphics, m_Pens[m_idxCurrPen],
+			(float)_wtof(aResult[0]), (float)_wtof(aResult[1]),
+			(float)_wtof(aResult[2]),
+			(float)_wtof(aResult[3]), (float)_wtof(aResult[4]),
+			(float)_wtof(aResult[5]));
+		return CDPE_OK;
+	}
+	else if (CDPCmdEqu(DrawRoseCurve))
+	{
+		if (m_idxCurrPen >= m_Pens.size())
+			return CDPE_NO_PEN;
+		GetParamList(pszCmd + cchCmd_DrawRoseCurve, rsTemp, aResult);
+		if (aResult.size() != 5)
+			return CDPE_PARAM_COUNT;
+		eck::DrawRoseCurve(m_pGraphics, m_Pens[m_idxCurrPen],
+			(float)_wtof(aResult[0]), (float)_wtof(aResult[1]),
+			(float)_wtof(aResult[2]),
+			(float)_wtof(aResult[3]),
+			(float)_wtof(aResult[4]));
+		return CDPE_OK;
+	}
+	//////////////////////////////////////////下面的指令需要画刷
 	else if (wcsncmp(pszCmd, szCmd_ListBrush, cchCmd_ListBrush) == 0)
 	{
 		auto pCtx = (QDPLISTOBJ*)lParam;
@@ -883,7 +981,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipDeleteGraphics(pGraphics);
 		pCtx->pBitmap = pBitmap;
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DelBrush, cchCmd_DelBrush) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_DelBrush, rsTemp, aResult);
@@ -904,7 +1002,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OK;
 		}
 		return CDPE_PARAM_COUNT;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_SelBrush, cchCmd_SelBrush) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_SelBrush, rsTemp, aResult);
@@ -915,7 +1013,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OUT_OF_RANGE;
 		m_idxCurrBrush = iRet;
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_FillRect, cchCmd_FillRect) == 0)
 	{
 		if (m_idxCurrBrush >= m_Brushes.size())
@@ -930,7 +1028,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipFillRectangleI(m_pGraphics, m_Brushes[m_idxCurrBrush], x1, y1, x2, y2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_FillEllipse, cchCmd_FillEllipse) == 0)
 	{
 		if (m_idxCurrBrush >= m_Brushes.size())
@@ -945,7 +1043,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipFillEllipseI(m_pGraphics, m_Brushes[m_idxCurrBrush], x1, y1, x2, y2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_FillPie, cchCmd_FillPie) == 0)
 	{
 		if (m_idxCurrBrush >= m_Brushes.size())
@@ -963,7 +1061,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 
 		GdipFillPieI(m_pGraphics, m_Brushes[m_idxCurrBrush], x1, y1, x2, y2, f1, f2);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_FillPolygon, cchCmd_FillPolygon) == 0)
 	{
 		if (m_idxCurrBrush >= m_Brushes.size())
@@ -981,7 +1079,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipFillPath(m_pGraphics, m_Brushes[m_idxCurrBrush], pPath);
 		GdipDeletePath(pPath);
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_FillText, cchCmd_FillText) == 0)
 	{
 		if (m_idxCurrBrush >= m_Brushes.size())
@@ -1004,8 +1102,8 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			&rcF, pStringFormat, m_Brushes[m_idxCurrBrush]);
 		GdipDeleteStringFormat(pStringFormat);
 		return CDPE_OK;
-		}
-		//////////////////////////////////////////下面的指令需要字体
+	}
+	//////////////////////////////////////////下面的指令需要字体
 	else if (wcsncmp(pszCmd, szCmd_ListFont, cchCmd_ListFont) == 0)
 	{
 		auto pCtx = (QDPLISTOBJ*)lParam;
@@ -1058,7 +1156,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		GdipDeleteGraphics(pGraphics);
 		pCtx->pBitmap = pBitmap;
 		return CDPE_OK;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_DelFont, cchCmd_DelFont) == 0)
 	{
 		GetParamList(pszCmd + cchCmd_DelFont, rsTemp, aResult);
@@ -1079,7 +1177,7 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 			return CDPE_OK;
 		}
 		return CDPE_PARAM_COUNT;
-		}
+	}
 	else if (wcsncmp(pszCmd, szCmd_GetStringSize, cchCmd_GetStringSize) == 0)
 	{
 		auto pCtx = (QDPGETSTRINGSIZE*)lParam;
@@ -1101,18 +1199,23 @@ int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, LPARAM lParam)
 		pCtx->cx = (int)rcF2.Width;
 		pCtx->cy = (int)rcF2.Height;
 		GdipDeleteStringFormat(pStringFormat);
-		}
-		return CDPE_INVALID_CMD;
+	}
+	return CDPE_INVALID_CMD;
 }
 
 int CDrawPanel::ExecuteCommand(PCWSTR pszCmd, const CDPIMAGE* pImgIn,
-	CDPSTR& sDisplay, CDPIMAGE* pImgOut, CDPImageMedium eMedium)
+	CDPSTR& sDisplay, CDPImageMedium eMedium)
 {
 	int i;
 	if (wcsncmp(pszCmd, szCmd_DrawImage, cchCmd_DrawImage) == 0)
 	{
 		CDPDRAWIMAGE img{ *pImgIn };
 		if ((i = ExecuteCommand(pszCmd, (LPARAM)&img)) == CDPE_OK)
+			return i;
+	}
+	else if (CDPCmdEqu(DrawDistortImage))
+	{
+		if ((i = ExecuteCommand(pszCmd, (LPARAM)pImgIn)) == CDPE_OK)
 			return i;
 	}
 	else if (wcsncmp(pszCmd, szCmd_GetImageSize, cchCmd_GetImageSize) == 0)
@@ -1165,4 +1268,27 @@ MakeErrText:
 	auto rsErr = eck::Format(L"执行命令时出错：%s(%d)", CdpGetErrInfo(i), i);
 	sDisplay = RefStrToCdpStr(rsErr);
 	return i;
+}
+
+int CDrawPanel::ExecuteCommandUrl(PCWSTR pszCmd, PCWSTR pszImageUrl,
+	CDPSTR& sDisplay)
+{
+	if (CDPCmdEqu(DrawImage) || CDPCmdEqu(DrawDistortImage) || CDPCmdEqu(GetImageSize))
+	{
+		auto rbImg = eck::RequestUrl(pszImageUrl);
+		if (rbImg.IsEmpty())
+		{
+			constexpr int i = CDPE_URL_REQUEST_FAILED;
+			auto rsErr = eck::Format(L"执行命令时出错：%s(%d)", CdpGetErrInfo(i), i);
+			sDisplay = RefStrToCdpStr(rsErr);
+			return i;
+		}
+		
+		CDPIMAGE Img;
+		Img.eMedium = CDPIM_BIN;
+		Img.Bin.pData = rbImg.Data();
+		Img.Bin.cb = rbImg.Size();
+		return ExecuteCommand(pszCmd, &Img, sDisplay, CDPIM_BIN);
+	}
+	return ExecuteCommand(pszCmd, NULL, sDisplay, CDPIM_BIN);
 }
